@@ -1,0 +1,22 @@
+---
+# Stable in-cluster S3 endpoint: http://objectstore.objectstore.svc.cluster.local:9000
+# This is the hostname the CAS disk's <endpoint> points at (step 3), so the name
+# is load-bearing — renaming the Service means editing the CHI.
+apiVersion: v1
+kind: Service
+metadata:
+  name: objectstore
+  namespace: objectstore
+  labels:
+    app: objectstore
+spec:
+  type: ClusterIP
+  selector:
+    app: objectstore
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001

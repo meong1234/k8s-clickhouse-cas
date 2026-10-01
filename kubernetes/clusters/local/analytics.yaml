@@ -1,0 +1,108 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: analytics-source
+  namespace: flux-system
+spec:
+  insecure: true
+  interval: 1m
+  provider: generic
+  ref:
+    tag: local
+  url: oci://k3d-local-dev-registry:5000/analytics-sync
+---
+# 1) ClickHouse Keeper quorum (3 nodes) - must exist before ClickHouse so that
+#    ReplicatedMergeTree tables have a coordination service to talk to.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: keeper-chk
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: clickhouse-operator-ks
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: OCIRepository
+    name: analytics-source
+  path: ./keeper/local
+  prune: true
+  # wait:false - the Altinity CHK custom resource does not expose a kstatus-native
+  # Ready condition, so we rely on dependsOn ordering + the operator's own
+  # reconcile/retry loop rather than blocking on a health check that can't resolve.
+  wait: false
+---
+# 2) In-cluster S3 (Silo) backing the CAS disk. Sits between Keeper and the CHI
+#    because the CHI's CAS disk fails its boot-time capability probe if the bucket
+#    is not already there. Independent of Keeper (it only needs the operator layer
+#    for ordering), so it reconciles alongside keeper-chk.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: objectstore
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: clickhouse-operator-ks
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: OCIRepository
+    name: analytics-source
+  path: ./objectstore/local
+  prune: true
+  # wait:true - unlike the Altinity CRs, a StatefulSet + Job are kstatus-native, so
+  # Flux can genuinely block here until the object store is Ready and the bucket Job
+  # Completed.
+  wait: true
+---
+# 3) ClickHouseInstallation (1 shard x 2 replicas). Depends on the Keeper quorum.
+#    The CHI references the Keeper by name (spec.configuration.zookeeper.keeper);
+#    the operator discovers the keeper endpoints automatically and retries until
+#    they are reachable, so this converges even if Keeper is still starting.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: clickhouse-chi
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: keeper-chk
+    - name: objectstore
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: OCIRepository
+    name: analytics-source
+  path: ./clickhouse/local
+  prune: true
+  wait: false
+---
+# 4) dbt runtime (P3, v1 contract): the in-cluster dbt-runner / dbt-tester CronJobs that
+#    run the Nimbus build/tests as Flux-managed Jobs. Depends on the CHI so the target
+#    warehouse (and the dbt-credentials Secret it reads) exist before the runner deploys.
+#    Manually driven via `make wh-build` / `make wh-test`; the CronJobs are suspended.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: dbt-runner
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: clickhouse-chi
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: OCIRepository
+    name: analytics-source
+  path: ./dbt/local
+  prune: true
+  # wait:false - a suspended CronJob has no rollout to wait on; dependsOn ordering is
+  # what matters (the CHI + Secret must exist first).
+  wait: false

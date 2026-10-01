@@ -1,0 +1,82 @@
+name: nimbus
+version: "0.1.0"
+config-version: 2
+
+# The profile is resolved from warehouse/dbt/profiles/profiles.yml
+# (passed via --profiles-dir by the wh-* make targets).
+profile: nimbus
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Project vars.
+# daily_balance_lookback_days — how many trailing days the incremental daily-balance
+# models rebuild on each run (int_account_daily_balance / fct_account_daily_balance).
+# Sizes the tolerance for slightly-late postings; genuine older backfill needs a
+# targeted `dbt run --full-refresh --select int_account_daily_balance` (see that model).
+#
+# event_lookback_days — trailing-day re-scan window for the append-only event facts
+# (fct_ledger_postings / fct_card_authorizations / fct_app_events). Kept separate from
+# (and smaller than) daily_balance_lookback_days: event rows have no cross-row
+# dependency, so the window only buys slack for late-arriving events dated before the
+# boundary day — 1 is plenty. delete_insert keys on the event's natural id, so re-scanning
+# a window is idempotent regardless of the value.
+vars:
+  daily_balance_lookback_days: 3
+  event_lookback_days: 1
+
+# Medallion layer -> ClickHouse database mapping.
+# The generate_schema_name override turns each +schema value into `nimbus_<value>`
+# (e.g. marts -> nimbus_marts), so every layer lands in its own ClickHouse database.
+#
+# Replication: table models set +engine ReplicatedMergeTree explicitly. dbt-clickhouse
+# 1.10.1 does NOT auto-convert MergeTree -> Replicated from the `cluster` profile
+# setting (validated in the P0 spike), so we must name the engine. The engine stays
+# BARE (no zk path / replica name) — the nimbus_* databases are `Replicated` (see
+# profiles.yml `database_engine`), which both supplies the per-table path from the
+# table UUID and rejects explicit arguments outright. Views (staging/intermediate)
+# have no engine.
+models:
+  nimbus:
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: view
+    marts:
+      +schema: marts
+      +materialized: table
+      +engine: ReplicatedMergeTree
+    metrics:
+      +schema: metrics
+      +materialized: table
+      +engine: ReplicatedMergeTree
+
+    # --- P6 real-time lambda: the streaming plane (control-plane-deployed) ---------
+    # models/stream/ -> nimbus_stream (silver), models/rt/ -> nimbus_rt (gold).
+    # Per-model config() sets the actual materialization (materialized_view /
+    # dictionary / table) and the Replicated engine — the group only fixes the schema
+    # (database) and the `rt` tag. That tag is the control-plane selector: the deploy
+    # CronJob runs `dbt run --select tag:rt`; the batch spine runs `dbt build
+    # --exclude tag:rt`, so the two planes never touch each other's objects (P6-F).
+    stream:
+      +schema: stream
+      +tags: ['rt']
+    rt:
+      +schema: rt
+      +tags: ['rt']
+
+# Static dimension seeds. No +schema -> they land in target.schema (nimbus_raw),
+# treated as static dims per the architecture doc. Replicated so they exist on both
+# pods like every other table (column types are pinned in seeds/schema.yml).
+seeds:
+  nimbus:
+    +engine: ReplicatedMergeTree

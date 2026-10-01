@@ -1,0 +1,29 @@
+*.swp
+*.swo
+*.tmp
+
+# OS ignores
+.DS_Store
+
+# IntelliJ workspace-specific
+.idea
+.ijwb
+
+# Ignore all VSCode settings
+/.vscode/
+
+# Build output
+/bin/
+/tmp/
+/.buildkite-caches/
+
+/build
+
+# Warehouse (dbt) host virtualenv (dbt artifacts are ignored in warehouse/dbt/.gitignore)
+/warehouse/.venv/
+
+# Generated synthetic-data CSVs (produced by `make wh-generate`, not source)
+/warehouse/generator/out/
+
+# Local scratch/dump folder — never committed. Claude must never read it (see CLAUDE.md).
+/.ignore/
